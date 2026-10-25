@@ -164,11 +164,17 @@ records and budgets.
 | `plain-feature-ledger` | plain | feature + tests + clean git commit |
 | `plain-refactor-rename` | plain | mechanical rename across call sites |
 | `plain-delegate-router` | plain | mandatory subtask delegation, then fix |
+| `plain-deflake-order` | plain | de-flake protocol: reproduce red first, test-side-only fix, green both orders, no skips/sleeps |
+| `plain-investigate-rootcause` | plain | no-fix investigation: ROOT_CAUSE.md with file:line + runnable repro; source untouched |
+| `plain-worklog-changelog` | plain | lane hygiene: fix + CHANGELOG bullet + dated worklog (Context/Change/Verification) |
+| `plain-pr-nevermerge` | plain | full PR lane vs gh/git shims: fix, push past auth hiccup, poll review to APPROVED, never merge, quote head SHA |
 | `board-walk-to-review` | safespace | worker lane: claim → heartbeat → evidence → in_review, criteria left to reviewer |
 | `board-reviewer-done` | safespace | reviewer: verify evidence → setCriteriaMet → done → verdict message |
 | `board-epic-lane` | safespace | manager: build epic, dependency-ordered tasks worked to done |
 | `board-lease-recovery` | safespace | lapsed lease: 409 claim_token → stand down or re-claim, no retry storm |
 | `board-session-orchestrate` | safespace | spawn worker session, poll, verify artifact, thank, report |
+| `board-clock-skew-heartbeat` | safespace | board clock skewed: future-stamp 400 → recover with board epoch within 2 attempts |
+| `board-fanout-two-workers` | safespace | parallel fan-out: two worker sessions, verify both artifacts, close task |
 
 Score = fraction of checks passed; `passed` requires all of them (budget and
 wall-time checks are always appended).

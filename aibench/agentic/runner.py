@@ -81,7 +81,9 @@ async def run_scenario(
         data: dict[str, Any] = {"session_id": ctx.session_id}
         if scenario.setup:
             bundle = SetupBundle(env, board, sessions, data, session_id=ctx.session_id)
-            scenario.setup(bundle)
+            maybe = scenario.setup(bundle)
+            if asyncio.iscoroutine(maybe):
+                await maybe
         task_text = scenario.render_task(data)
 
         ctx.deadline = time.time() + scenario.max_seconds

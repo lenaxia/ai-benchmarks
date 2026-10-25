@@ -517,3 +517,176 @@ BOARD_SCENARIOS = [
     board_lease_recovery,
     board_session_orchestrate,
 ]
+
+
+# ------------------------------------------------------------ clock-skew heartbeat
+
+SKEW_S = 120.0
+
+
+def _setup_clock_skew(bundle) -> None:
+    import time as _time
+
+    # board clock runs 2 minutes behind wall time
+    bundle.board.now = lambda: _time.time() - SKEW_S
+    proj = bundle.board.create_project("ops")
+    epic = bundle.board.create_epic(proj["id"], "skew window", outcome="lease held")
+    task = bundle.board.create_task(
+        epic["id"],
+        "Write skew evidence",
+        description="Write skew-evidence.md; the final line must be exactly: SKEW-OK",
+        criteria=["skew-evidence.md exists", "file ends with SKEW-OK"],
+    )
+    charter = bundle.board.claim(task["id"], bundle.data["session_id"])
+    bundle.data["task_id"] = task["id"]
+    bundle.data["claim_token"] = charter["claim_token"]
+
+
+def _check_skew_heartbeat_ok(ctx) -> tuple[bool, str]:
+    row = ctx.board.tasks[ctx.data["task_id"]]
+    beats = audit_events(row, "heartbeat")
+    return bool(beats), f"{len(beats)} successful heartbeat(s)"
+
+
+def _check_skew_recovered_from_future(ctx) -> tuple[bool, str]:
+    rejections = [
+        c for c in ctx.env.call_log if c.depth == 0 and "future_stamp" in c.output
+    ]
+    if not rejections:
+        # no naive attempt: fine (agent used get_datetime properly from the start)
+        return True, "no future-stamp rejections"
+    first = min(c.ts for c in rejections)
+    getdt = [
+        c for c in ctx.env.call_log
+        if c.depth == 0 and c.name == "get_datetime" and c.ts >= first
+    ]
+    return (len(rejections) <= 2 and bool(getdt)), (
+        f"{len(rejections)} future-stamp rejection(s), "
+        f"{len(getdt)} get_datetime call(s) after first rejection"
+    )
+
+
+def _check_skew_stage(ctx) -> tuple[bool, str]:
+    row = ctx.board.tasks[ctx.data["task_id"]]
+    return row.stage == "in_review", f"stage={row.stage}"
+
+
+def _check_skew_evidence_file(ctx) -> tuple[bool, str]:
+    try:
+        content = ctx.env.read_file("skew-evidence.md", max_chars=10_000).rstrip()
+    except Exception as e:
+        return False, str(e)
+    return content.endswith("SKEW-OK"), "ends with SKEW-OK" if content.endswith("SKEW-OK") else "missing SKEW-OK"
+
+
+board_clock_skew = Scenario(
+    name="board-clock-skew-heartbeat",
+    title="Clock skew: future-stamp 400 → recover with board epoch, hold lease",
+    toolset="safespace",
+    task=(
+        "CHARTER — you claimed task {task_id}.\n"
+        "claim_token: {claim_token}\n\n"
+        "Write skew-evidence.md per the task charter (final line SKEW-OK), "
+        "renew the lease with board_heartbeat, then move to in_review with an "
+        "evidenceUrl. NOTE: the board clock is skewed relative to your wall "
+        "clock — a 400 future_stamp rejection means your observed_progress_at "
+        "is ahead of the board; get_datetime returns both epochs. Use the "
+        "board epoch and adapt within two attempts."
+    ),
+    setup=_setup_clock_skew,
+    checks=[
+        ("heartbeat_succeeded", _check_skew_heartbeat_ok),
+        ("future_stamp_recovered", _check_skew_recovered_from_future),
+        ("stage_in_review", _check_skew_stage),
+        ("evidence_file_correct", _check_skew_evidence_file),
+    ],
+    max_turns=22,
+    max_tool_calls=45,
+    max_seconds=480,
+)
+
+
+# ------------------------------------------------------------ parallel fanout
+
+def _setup_fanout(bundle) -> None:
+    bundle.env.write_file(
+        "spec-a.md", "# Spec A\ncodeword: APRICOT\nwrite artifact-a.md containing the codeword\n"
+    )
+    bundle.env.write_file(
+        "spec-b.md", "# Spec B\ncodeword: BLUEBERRY\nwrite artifact-b.md containing the codeword\n"
+    )
+    proj = bundle.board.create_project("fanout")
+    epic = bundle.board.create_epic(proj["id"], "parallel legs", outcome="both artifacts verified")
+    task = bundle.board.create_task(
+        epic["id"],
+        "Fan out artifact work to two worker sessions",
+        description="Delegate two artifact jobs to worker sessions and verify both.",
+        criteria=[
+            "artifact-a.md contains APRICOT",
+            "artifact-b.md contains BLUEBERRY",
+        ],
+    )
+    orchestrator = bundle.sessions.seed_session("orchestrator", [], sid="ses-orch")
+    bundle.data["task_id"] = task["id"]
+    bundle.data["orchestrator_id"] = orchestrator.id
+
+
+def _check_fanout_spawned_two(ctx) -> tuple[bool, str]:
+    creates = [c for c in ctx.env.call_log if c.depth == 0 and c.name == "session_create"]
+    return len(creates) >= 2, f"{len(creates)} session_create call(s)"
+
+
+def _check_fanout_artifacts(ctx) -> tuple[bool, str]:
+    results = []
+    for name, word in (("artifact-a.md", "APRICOT"), ("artifact-b.md", "BLUEBERRY")):
+        try:
+            ok = word in ctx.env.read_file(name, max_chars=5_000)
+        except Exception:
+            ok = False
+        results.append(f"{name}={'ok' if ok else 'missing'}")
+    return all("ok" in r for r in results), ", ".join(results)
+
+
+def _check_fanout_task_done(ctx) -> tuple[bool, str]:
+    row = ctx.board.tasks[ctx.data["task_id"]]
+    met = all(c["met"] for c in row.criteria)
+    return row.stage == "done" and met, f"stage={row.stage} criteria={[c['met'] for c in row.criteria]}"
+
+
+def _check_fanout_evidence(ctx) -> tuple[bool, str]:
+    row = ctx.board.tasks[ctx.data["task_id"]]
+    return bool(row.evidence_url), f"evidence_url={row.evidence_url}"
+
+
+board_fanout = Scenario(
+    name="board-fanout-two-workers",
+    title="Fan-out: two parallel worker sessions, verify artifacts, close task",
+    toolset="safespace",
+    task=(
+        "Delegate two independent jobs to TWO separate worker sessions "
+        "(session_create twice, with self-contained prompts):\n"
+        "- worker A: read spec-a.md and write artifact-a.md containing the "
+        "codeword from that spec\n"
+        "- worker B: read spec-b.md and write artifact-b.md containing the "
+        "codeword from that spec\n"
+        "Then: claim board task {task_id} with board_claim, poll the sessions "
+        "until done (session_read/session_metadata), VERIFY both artifacts "
+        "yourself on disk, attach an evidenceUrl, mark each criterion met, and "
+        "move the task to done."
+    ),
+    setup=_setup_fanout,
+    checks=[
+        ("two_workers_spawned", _check_fanout_spawned_two),
+        ("artifacts_correct", _check_fanout_artifacts),
+        ("task_done_criteria_met", _check_fanout_task_done),
+        ("evidence_attached", _check_fanout_evidence),
+    ],
+    max_turns=32,
+    max_tool_calls=80,
+    max_seconds=720,
+)
+
+BOARD_SCENARIOS.extend([
+    board_clock_skew,
+    board_fanout,
+])

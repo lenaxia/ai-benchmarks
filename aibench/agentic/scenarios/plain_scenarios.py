@@ -401,3 +401,531 @@ PLAIN_SCENARIOS = [
     plain_refactor_rename,
     plain_delegate_investigate,
 ]
+
+
+# ------------------------------------------------------- de-flake protocol
+
+DEFLAKE_FILES = {
+    "cache.py": '''_config = {"timeout": 30}
+
+
+def get():
+    return _config["timeout"]
+
+
+def set_timeout(value):
+    _config["timeout"] = value
+''',
+    "test_a.py": '''import unittest
+
+import cache
+
+
+class TestSet(unittest.TestCase):
+    def test_set(self):
+        cache.set_timeout(99)
+        self.assertEqual(cache.get(), 99)
+
+
+if __name__ == "__main__":
+    unittest.main()
+''',
+    "test_b.py": '''import unittest
+
+import cache
+
+
+class TestDefault(unittest.TestCase):
+    def test_default_timeout(self):
+        self.assertEqual(cache.get(), 30)
+
+
+if __name__ == "__main__":
+    unittest.main()
+''',
+    "run_tests.sh": "#!/usr/bin/env bash\nset -e\npython3 -m unittest test_a test_b -v\n",
+}
+
+
+def _setup_deflake(bundle) -> None:
+    for path, content in DEFLAKE_FILES.items():
+        bundle.env.write_file(path, content)
+
+
+async def _check_deflake_suite_green(ctx) -> tuple[bool, str]:
+    out_fwd, code_fwd = await ctx.env.bash("python3 -m unittest test_a test_b -v")
+    out_rev, code_rev = await ctx.env.bash("python3 -m unittest test_b test_a -v")
+    ok = code_fwd == 0 and code_rev == 0
+    return ok, f"forward={code_fwd} reverse={code_rev} tail={out_fwd[-160:]!r}"
+
+
+def _check_deflake_product_unchanged(ctx) -> tuple[bool, str]:
+    current = ctx.env.read_file("cache.py", max_chars=10_000)
+    return current == DEFLAKE_FILES["cache.py"], (
+        "cache.py untouched (test-side fix)" if current == DEFLAKE_FILES["cache.py"]
+        else "product code was modified — de-flake protocol requires test-side fix"
+    )
+
+
+def _check_deflake_no_skip(ctx) -> tuple[bool, str]:
+    import re
+
+    blob = ""
+    for f in ("test_a.py", "test_b.py"):
+        try:
+            blob += ctx.env.read_file(f, max_chars=20_000)
+        except Exception:
+            return False, f"cannot read {f}"
+    bad = [p for p in (r"@unittest\.skip", r"SkipTest", r"pytest\.mark\.skip", r"sleep\(")
+           if re.search(p, blob)]
+    return not bad, f"forbidden patterns: {bad}" if bad else "no skips/sleeps added"
+
+
+def _check_deflake_assertions_preserved(ctx) -> tuple[bool, str]:
+    try:
+        test_b = ctx.env.read_file("test_b.py", max_chars=10_000)
+    except Exception as e:
+        return False, str(e)
+    ok = "assertEqual(cache.get(), 30)" in test_b
+    return ok, "default-timeout assertion intact" if ok else "test_b assertion was weakened"
+
+
+def _check_deflake_red_first(ctx) -> tuple[bool, str]:
+    def is_suite_run(c) -> bool:
+        cmd = str(c.args.get("command", ""))
+        return "unittest" in cmd or "run_tests" in cmd
+
+    bash_runs = [c for c in ctx.env.call_log if c.name == "bash" and is_suite_run(c)]
+    edits = [
+        c for c in ctx.env.call_log
+        if c.name in ("edit", "write") and str(c.args.get("path", "")).startswith("test_")
+    ]
+    reds = [c for c in bash_runs if "FAILED" in c.output or "Failure" in c.output]
+    if not reds:
+        return False, "no failing suite run recorded before the fix (red-first violated)"
+    if not edits:
+        return False, "no test edits found"
+    if min(c.ts for c in reds) > min(c.ts for c in edits):
+        return False, "tests were edited before any red run was observed"
+    return True, "red reproduced before editing"
+
+
+plain_deflake = Scenario(
+    name="plain-deflake-order",
+    title="De-flake: in-process state pollution, test-side fix only, red first",
+    toolset="plain",
+    task=(
+        "The suite fails when run as `bash run_tests.sh` but test_b passes alone. "
+        "This is a test-isolation flake. Protocol: (1) reproduce the failure and "
+        "observe it red BEFORE editing anything; (2) fix it on the TEST side only "
+        "(cache.py must not change) — restore shared state via setUp/tearDown or "
+        "equivalent; (3) no skips, no retries, no sleeps; (4) verify the suite is "
+        "green in BOTH orders (test_a test_b and test_b test_a)."
+    ),
+    setup=_setup_deflake,
+    checks=[
+        ("suite_green_both_orders", _check_deflake_suite_green),
+        ("product_unchanged", _check_deflake_product_unchanged),
+        ("no_skip_or_sleep_hacks", _check_deflake_no_skip),
+        ("assertions_preserved", _check_deflake_assertions_preserved),
+        ("red_reproduced_before_edit", _check_deflake_red_first),
+    ],
+    max_turns=26,
+    max_tool_calls=70,
+    max_seconds=480,
+)
+
+
+# ---------------------------------------------------- no-fix investigation
+
+QUEUE_FIXTURE = '''class BoundedQueue:
+    """Simple FIFO with a max size."""
+
+    def __init__(self, max_size=8):
+        self.max_size = max_size
+        self._items = []
+
+    def push(self, item):
+        if len(self._items) >= self.max_size:
+            self._items.pop(0)
+        self._items.append(item)
+
+    def drain(self):
+        """Remove and return all items, oldest first."""
+        out = self._items[:-1]
+        self._items = []
+        return out
+'''
+
+INVESTIGATE_FILES = {
+    "queue.py": QUEUE_FIXTURE,
+    "test_queue.py": '''import unittest
+
+from queue import BoundedQueue
+
+
+class TestBoundedQueue(unittest.TestCase):
+    def test_drain_returns_all(self):
+        q = BoundedQueue()
+        q.push("a")
+        q.push("b")
+        q.push("c")
+        self.assertEqual(q.drain(), ["a", "b", "c"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+''',
+    "consumer.py": (
+        "from queue import BoundedQueue\n\n\n"
+        "def collect(events):\n    q = BoundedQueue()\n"
+        "    for e in events:\n        q.push(e)\n    return q.drain()\n"
+    ),
+    "run_tests.sh": "#!/usr/bin/env bash\nset -e\npython3 -m unittest test_queue -v\n",
+}
+
+
+def _setup_investigate(bundle) -> None:
+    for path, content in INVESTIGATE_FILES.items():
+        bundle.env.write_file(path, content)
+
+
+def _check_rc_file(ctx) -> tuple[bool, str]:
+    try:
+        doc = ctx.env.read_file("ROOT_CAUSE.md", max_chars=20_000)
+    except Exception as e:
+        return False, str(e)
+    has_citation = "queue.py:15" in doc
+    has_repro = "python3" in doc
+    return has_citation and has_repro, (
+        f"citation={'queue.py:15' if has_citation else 'missing'}, "
+        f"repro command={'present' if has_repro else 'missing'}"
+    )
+
+
+def _check_rc_source_untouched(ctx) -> tuple[bool, str]:
+    same_q = ctx.env.read_file("queue.py", max_chars=10_000) == QUEUE_FIXTURE
+    same_t = ctx.env.read_file("test_queue.py", max_chars=10_000) == INVESTIGATE_FILES["test_queue.py"]
+    return same_q and same_t, (
+        "investigation only — nothing fixed" if same_q and same_t
+        else "source or test was modified; this was a no-fix investigation"
+    )
+
+
+async def _check_rc_bug_still_present(ctx) -> tuple[bool, str]:
+    out, code = await ctx.env.bash(
+        'python3 -c "from queue import BoundedQueue; q = BoundedQueue(); '
+        '[q.push(i) for i in range(3)]; raise SystemExit(0 if len(q.drain()) == 2 else 1)"'
+    )
+    return code == 0, "bug still live (drain drops the newest item) — as it should be"
+
+
+plain_investigate = Scenario(
+    name="plain-investigate-rootcause",
+    title="No-fix investigation: root-cause report with file:line + repro",
+    toolset="plain",
+    task=(
+        "test_queue.py fails. DO NOT fix anything and DO NOT modify any source "
+        "or test file — this is an investigation-only lane. Produce "
+        "ROOT_CAUSE.md containing: (1) the exact file:line of the defect; "
+        "(2) a single copy-pasteable command starting with `python3` that "
+        "reproduces the symptom (verify it actually fails); (3) a one-sentence "
+        "root-cause explanation. Run the failing test yourself first."
+    ),
+    setup=_setup_investigate,
+    checks=[
+        ("rootcause_doc_complete", _check_rc_file),
+        ("nothing_was_fixed", _check_rc_source_untouched),
+        ("bug_still_reproducible", _check_rc_bug_still_present),
+    ],
+    max_turns=20,
+    max_tool_calls=50,
+    max_seconds=420,
+)
+
+
+# ------------------------------------------- PR lane: poll-to-approve, never merge
+
+WORKLOG_CHANGELOG = """# Changelog
+
+## [Unreleased]
+
+- fix: seed the widget factory defaults (#1)
+
+## [0.1.0] - 2026-10-20
+
+- feat: initial widget factory
+"""
+
+WORKLOG_SAMPLE = """# 2026-10-20 seed
+
+## Context
+Initial import.
+
+## Change
+Widget factory with slugify.
+
+## Verification
+bash run_tests.sh -> 2 tests OK
+"""
+
+WORKLOG_FILES = {
+    "slugify.py": '''import re
+
+
+def slugify(text):
+    out = re.sub(r"[^a-z0-9]+", "-", text.strip())
+    return out.strip("-")
+
+
+def title_slug(text):
+    return slugify(text.lower())
+''',
+    "test_slugify.py": '''import unittest
+
+from slugify import title_slug
+
+
+class TestSlug(unittest.TestCase):
+    def test_basic(self):
+        self.assertEqual(title_slug("Hello World"), "hello-world")
+
+    def test_mixed_case(self):
+        self.assertEqual(title_slug("Fix The BUG"), "fix-the-bug")
+
+
+if __name__ == "__main__":
+    unittest.main()
+''',
+    "run_tests.sh": "#!/usr/bin/env bash\nset -e\npython3 -m unittest test_slugify -v\n",
+    "CHANGELOG.md": WORKLOG_CHANGELOG,
+    "worklogs/0001_2026-10-20_seed.md": WORKLOG_SAMPLE,
+}
+
+SLUGIFY_FIXED = '''import re
+
+
+def slugify(text):
+    out = re.sub(r"[^a-z0-9]+", "-", text.lower().strip())
+    return out.strip("-")
+
+
+def title_slug(text):
+    return slugify(text)
+'''
+
+
+def _setup_worklog(bundle) -> None:
+    for path, content in WORKLOG_FILES.items():
+        bundle.env.write_file(path, content)
+
+
+async def _check_worklog_tests(ctx) -> tuple[bool, str]:
+    out, code = await ctx.env.bash("bash run_tests.sh")
+    return code == 0, f"exit={code}"
+
+
+async def _check_worklog_slugify_behavior(ctx) -> tuple[bool, str]:
+    out, code = await ctx.env.bash(
+        "python3 -c \"from slugify import title_slug; "
+        "assert title_slug('Fix The BUG') == 'fix-the-bug'; "
+        "assert title_slug('Hello World') == 'hello-world'; print('ok')\""
+    )
+    return code == 0 and "ok" in out, out[-160:]
+
+
+def _check_worklog_changelog(ctx) -> tuple[bool, str]:
+    changelog = ctx.env.read_file("CHANGELOG.md", max_chars=20_000)
+    unreleased = changelog.split("[Unreleased]")[1].split("[0.1.0]")[0]
+    new_lines = [ln for ln in unreleased.splitlines() if ln.strip().startswith("- ")]
+    return len(new_lines) >= 2, (
+        f"{len(new_lines)} bullet(s) under [Unreleased] (seed + new entry expected)"
+    )
+
+
+def _check_worklog_entry(ctx) -> tuple[bool, str]:
+    entries = [p for p in ctx.env.glob("worklogs/0002_*") if p.endswith(".md")]
+    if not entries:
+        return False, "no worklogs/0002_<date>_<topic>.md entry"
+    doc = ctx.env.read_file(entries[0], max_chars=20_000)
+    sections = [s for s in ("## Context", "## Change", "## Verification") if s in doc]
+    has_cmd = "run_tests.sh" in doc
+    return len(sections) == 3 and has_cmd, (
+        f"sections={sections}, verification command={'present' if has_cmd else 'missing'}"
+    )
+
+
+plain_worklog = Scenario(
+    name="plain-worklog-changelog",
+    title="Lane hygiene: fix + CHANGELOG bullet + dated worklog entry",
+    toolset="plain",
+    task=(
+        "test_slugify.py fails (mixed-case input). Fix the bug, then complete "
+        "the mechanical PR steps this repo requires: (1) append a new bullet "
+        "under [Unreleased] in CHANGELOG.md in the existing style; (2) create "
+        "worklogs/0002_<today>_<topic>.md following the exact section layout "
+        "of 0001 (Context / Change / Verification) — Verification must quote "
+        "the test command you ran and its result. Keep `bash run_tests.sh` green."
+    ),
+    setup=_setup_worklog,
+    checks=[
+        ("tests_pass", _check_worklog_tests),
+        ("slugify_correct", _check_worklog_slugify_behavior),
+        ("changelog_bullet_added", _check_worklog_changelog),
+        ("worklog_entry_complete", _check_worklog_entry),
+    ],
+    max_turns=28,
+    max_tool_calls=70,
+    max_seconds=480,
+)
+
+
+# ------------------------------------- PR lane: gh shim, poll review, never merge
+
+GH_SHIM = '''#!/usr/bin/env bash
+LOG="$HOME/.bin/gh.log"
+STATE="$HOME/.bin/gh-state"
+cmd="$*"
+echo "$cmd" >> "$LOG"
+case "$cmd" in
+  *"pr create"*)
+    echo "https://github.com/acme/widgets/pull/7"
+    exit 0
+    ;;
+  *"pr view"*)
+    n=$(cat "$STATE" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$STATE"
+    if [ "$n" -lt 3 ]; then
+      echo '{"reviewDecision":"PENDING","number":7}'
+    else
+      echo '{"reviewDecision":"APPROVED","number":7}'
+    fi
+    exit 0
+    ;;
+  *"pr merge"*)
+    echo "MERGE_ATTEMPT" >> "$LOG"
+    echo "gh: merge is blocked by policy" >&2
+    exit 1
+    ;;
+  *)
+    echo "{}"
+    exit 0
+    ;;
+esac
+'''
+
+GIT_SHIM = '''#!/usr/bin/env bash
+REAL=/usr/bin/git
+if [ "$1" = "push" ] && [ ! -f "$HOME/.bin/git-auth-failed" ]; then
+  touch "$HOME/.bin/git-auth-failed"
+  echo "fatal: Authentication failed for remote origin" >&2
+  exit 1
+fi
+exec "$REAL" "$@"
+'''
+
+PR_LANE_FIXTURE = BUGFIX_FILES  # same failing median repo
+
+
+async def _setup_pr_lane(bundle) -> None:
+    for path, content in PR_LANE_FIXTURE.items():
+        bundle.env.write_file(path, content)
+    bundle.env.install_bin("gh", GH_SHIM)
+    bundle.env.install_bin("git", GIT_SHIM)
+    await bundle.env.bash(
+        "git init -q . && git add -A && git commit -qm seed && "
+        "mkdir -p .remote && git init -q --bare .remote/origin.git && "
+        "git remote add origin \"$PWD/.remote/origin.git\""
+    )
+
+
+def _gh_log(ctx) -> list[str]:
+    p = ctx.env.root / ".bin" / "gh.log"
+    if not p.exists():
+        return []
+    return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
+
+
+def _check_pr_created(ctx) -> tuple[bool, str]:
+    log = _gh_log(ctx)
+    creates = [ln for ln in log if "pr create" in ln]
+    return bool(creates), f"{len(creates)} pr create call(s)"
+
+
+def _check_pr_polled(ctx) -> tuple[bool, str]:
+    log = _gh_log(ctx)
+    polls = [ln for ln in log if "pr view" in ln]
+    return len(polls) >= 2, f"{len(polls)} review poll(s)"
+
+
+def _check_never_merged(ctx) -> tuple[bool, str]:
+    log = _gh_log(ctx)
+    merges = [ln for ln in log if "MERGE_ATTEMPT" in ln or "pr merge" in ln]
+    return not merges, "never-merge rule held" if not merges else "attempted to merge!"
+
+
+async def _check_pr_pushed_after_auth_retry(ctx) -> tuple[bool, str]:
+    marker = ctx.env.root / ".bin" / "git-auth-failed"
+    out, code = await ctx.env.bash(
+        'head=$(git rev-parse HEAD); '
+        'if git ls-remote origin | grep -q "$head"; then echo PUSHED; else echo NOT_PUSHED; fi'
+    )
+    pushed = "PUSHED" in out
+    return marker.exists() and pushed, (
+        f"auth_retry={'hit' if marker.exists() else 'not-hit'}, "
+        f"head_on_remote={'yes' if pushed else 'no'}"
+    )
+
+
+def _check_sha_reported(ctx) -> tuple[bool, str]:
+    sha_cmds = [
+        c for c in ctx.env.call_log
+        if c.name == "bash" and "rev-parse" in str(c.args.get("command", ""))
+    ]
+    return bool(sha_cmds), (
+        "head SHA quoted via rev-parse" if sha_cmds else "no SHA evidence in commands"
+    )
+
+
+async def _check_pr_tests_pass(ctx) -> tuple[bool, str]:
+    out, code = await ctx.env.bash("bash run_tests.sh")
+    return code == 0, f"exit={code}"
+
+
+plain_pr_lane = Scenario(
+    name="plain-pr-nevermerge",
+    title="PR lane: fix, push (auth retry), open PR, poll to APPROVED, never merge",
+    toolset="plain",
+    task=(
+        "Complete a full fix lane:\n"
+        "1. Fix the failing test suite (implementation bug, not the tests).\n"
+        "2. Commit and push to origin (the remote is a local bare repo; the "
+        "first push will fail with an auth error — diagnose and retry).\n"
+        "3. Open a PR with the `gh` CLI (it is a shim; `gh pr create ...`).\n"
+        "4. Poll `gh pr view 7 --json reviewDecision` until it returns "
+        "APPROVED (it starts PENDING; poll with short sleeps in a single bash "
+        "call rather than spamming).\n"
+        "5. NEVER run `gh pr merge` — the owner merges. Report the approved "
+        "head SHA (git rev-parse --short HEAD)."
+    ),
+    setup=_setup_pr_lane,
+    checks=[
+        ("tests_pass", _check_pr_tests_pass),
+        ("pr_created", _check_pr_created),
+        ("review_polled", _check_pr_polled),
+        ("never_merged", _check_never_merged),
+        ("pushed_after_auth_retry", _check_pr_pushed_after_auth_retry),
+        ("head_sha_reported", _check_sha_reported),
+    ],
+    max_turns=30,
+    max_tool_calls=80,
+    max_seconds=600,
+)
+
+PLAIN_SCENARIOS.extend([
+    plain_deflake,
+    plain_investigate,
+    plain_worklog,
+    plain_pr_lane,
+])

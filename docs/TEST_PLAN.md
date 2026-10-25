@@ -50,6 +50,13 @@ Validated live (2026-10-25, hosted relay):
 | qwen38-flash-next | PASS | PASS | - | - | - | - | - | - | - |
 | default (qwen38 27b) | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | FAIL (contract: made `balance()` a property; grader caught it) |
 
+Second scenario wave (de-flake, no-fix investigation, worklog hygiene, PR
+never-merge lane, clock-skew, fan-out) validated live on default (27b):
+plain-pr-nevermerge PASS, board-fanout-two-workers PASS, plain-deflake-order
+PASS. Notable: the PR-lane check was corrected after live testing because the
+model pushed a feature branch (better lane discipline than the check
+assumed) — graders get hardened by the same live runs.
+
 Agentic loops measured 75-82% prompt-cache utilisation — the per-turn cache
 accounting works against a server that reports `cached_tokens`.
 

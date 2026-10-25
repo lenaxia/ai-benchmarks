@@ -25,6 +25,11 @@ class Step:
     usage: dict[str, Any] | None = None
     error: str | None = None
     finish_reason: str | None = None
+    # When set, this step fires only when `match` is a substring of the last
+    # message's serialized content — enables deterministic scripts across
+    # concurrently-running loops (parent vs worker sessions). Match steps fire
+    # once; non-match steps fire FIFO.
+    match: str | None = None
 
 
 class ScriptedProvider(Provider):
@@ -34,6 +39,17 @@ class ScriptedProvider(Provider):
         self.steps = list(steps)
         self.calls: list[dict[str, Any]] = []
         self._n = 0
+
+    def _pick(self, last_message: str) -> Step | None:
+        """Match-step firing: FIFO head if it has no match; otherwise the
+        first remaining match-step whose substring fits the last message."""
+        for i, step in enumerate(self.steps):
+            if step.match is None:
+                return self.steps.pop(i)
+        for i, step in enumerate(self.steps):
+            if step.match and step.match in last_message:
+                return self.steps.pop(i)
+        return None
 
     async def chat(
         self,
@@ -48,10 +64,10 @@ class ScriptedProvider(Provider):
         self.calls.append({"messages": messages, "tools": tools, "n": self._n})
         idx = self._n
         self._n += 1
-        if idx >= len(self.steps):
+        last_content = str(messages[-1].get("content")) if messages else ""
+        step = self._pick(last_content)
+        if step is None:
             step = Step(text="(scripted end)")
-        else:
-            step = self.steps[idx]
 
         tracker = StreamTracker()
         time.sleep(0.001)
