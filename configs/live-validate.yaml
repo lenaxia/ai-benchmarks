@@ -1,0 +1,35 @@
+# Live validation run against the hosted endpoint (small scale on purpose).
+run_name: live-validate-qwen38-flash-next
+notes: "harness validation vs hosted qwen38-flash-next (reasoning model, reports cached_tokens)"
+
+provider:
+  type: openai
+  base_url: ${OPENAI_API_BASE}
+  model: qwen38-flash-next
+  api_key: ${OPENAI_API_KEY}
+  timeout_s: 300
+  max_retries: 2
+
+hardware:
+  capture: false
+  manual:
+    notes: hosted endpoint (thekao.cloud relay); provider-side hardware unknown
+
+perf:
+  repeats: 2
+  warmup: 1
+  decode:
+    context_levels: [512, 4096, 16384]
+    output_tokens: 200
+  prefill:
+    prompt_levels: [1024, 8192, 32768]
+    max_tokens: 48
+  cache:
+    prefix_tokens: 4096
+    repeats: 3
+    warmup: 1
+
+agentic:
+  enabled: false
+
+output_dir: results

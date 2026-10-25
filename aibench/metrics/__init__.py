@@ -70,6 +70,25 @@ def decode_tps(timing: Timing, output_tokens: int | None) -> float | None:
     return (output_tokens - 1) / decode_s
 
 
+def decode_tps_gross(timing: Timing, output_tokens: int | None) -> float | None:
+    """Gross generation throughput: output tokens / full request wall time.
+
+    Includes prefill and any thinking — a conservative floor that stays
+    meaningful when a relay burst-delivers the stream (see is_burst_stream).
+    """
+    if not output_tokens or not timing.total_ms:
+        return None
+    return output_tokens / (timing.total_ms / 1000.0)
+
+
+def is_burst_stream(timing: Timing, min_chunks: int = 20, max_mean_itl_ms: float = 2.0) -> bool:
+    """Detect relay/proxy burst delivery: many chunks arriving nearly
+    simultaneously make inter-token timing meaningless for decode speed."""
+    if timing.n_chunks < min_chunks or timing.itl_mean_ms is None:
+        return False
+    return timing.itl_mean_ms < max_mean_itl_ms
+
+
 def prefill_tps(timing: Timing, prompt_tokens: int | None, cached_tokens: int | None = None) -> float | None:
     """Approximate prefill throughput: non-cached prompt tokens per second of TTFT.
 

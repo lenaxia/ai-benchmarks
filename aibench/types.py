@@ -77,6 +77,7 @@ class Timing:
     n_chunks: int = 0
     # derived
     ttft_ms: float | None = None
+    ttft_content_ms: float | None = None
     total_ms: float | None = None
     itl_mean_ms: float | None = None
     itl_p50_ms: float | None = None
@@ -86,6 +87,7 @@ class Timing:
     def to_dict(self) -> dict[str, Any]:
         return {
             "ttft_ms": self.ttft_ms,
+            "ttft_content_ms": self.ttft_content_ms,
             "total_ms": self.total_ms,
             "itl_mean_ms": self.itl_mean_ms,
             "itl_p50_ms": self.itl_p50_ms,

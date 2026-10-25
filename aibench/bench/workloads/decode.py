@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from aibench.bench.corpus import DECODE_INSTRUCTION, TokenEstimator
 from aibench.bench.workloads.base import RequestRecord, Workload
-from aibench.metrics import decode_tps, prefill_tps
+from aibench.metrics import decode_tps, decode_tps_gross, is_burst_stream, prefill_tps
 from aibench.providers.base import Provider
 
 
@@ -46,8 +46,12 @@ class DecodeAtContextWorkload(Workload):
             target_output_tokens=self.output_tokens,
             response=resp,
         )
-        rec.derived["decode_tps"] = decode_tps(resp.timing, out_tok)
-        if resp.usage and resp.prompt_tokens is not None or resp.prompt_tokens:
+        rec.derived["decode_tps"] = None if is_burst_stream(resp.timing) else decode_tps(
+            resp.timing, out_tok
+        )
+        rec.derived["decode_tps_gross"] = decode_tps_gross(resp.timing, out_tok)
+        rec.derived["burst_stream"] = is_burst_stream(resp.timing)
+        if resp.prompt_tokens():
             rec.derived["prefill_tps"] = prefill_tps(
                 resp.timing, resp.prompt_tokens(), resp.usage.cached_tokens if resp.usage else None
             )

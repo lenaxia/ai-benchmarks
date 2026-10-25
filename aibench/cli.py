@@ -102,8 +102,13 @@ async def _cmd_run(args) -> int:
         cfg.agentic.repeats = args.repeat
     if args.only == "perf":
         cfg.agentic.enabled = False
-    if args.only == "agentic":
+        cfg.perf.enabled = True
+    elif args.only == "agentic":
         cfg.perf.enabled = False
+        cfg.agentic.enabled = True
+    else:
+        cfg.perf.enabled = True
+        cfg.agentic.enabled = True
 
     print(f"aibench run: {cfg.run_name}")
     hardware = None

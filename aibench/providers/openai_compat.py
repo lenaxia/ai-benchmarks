@@ -16,7 +16,30 @@ import httpx
 
 from aibench.metrics import StreamTracker
 from aibench.providers.base import Provider, register_provider
-from aibench.types import ChatResponse, Message, ToolCall, ToolSchema, Usage
+from aibench.types import ChatResponse, Message, Timing, ToolCall, ToolSchema, Usage
+
+
+class _Trackers:
+    """Three views of the same stream.
+
+    ``any``      — every output delta (reasoning + content + tool fragments);
+                   the standard TTFT timeline and decode-span source, correct
+                   for reasoning models where visible content arrives late.
+    ``content``  — visible content only (user-latency view).
+    ``reasoning``— reasoning deltas only.
+    """
+
+    def __init__(self) -> None:
+        self.any = StreamTracker()
+        self.content = StreamTracker()
+        self.reasoning = StreamTracker()
+
+
+    def snapshot(self) -> Timing:
+        t = self.any.snapshot()
+        content_snap = self.content.snapshot()
+        t.ttft_content_ms = content_snap.ttft_ms
+        return t
 
 
 class _Retryable(Exception):
@@ -97,12 +120,9 @@ class OpenAICompatProvider(Provider):
         while attempt <= self.max_retries:
             if self.request_delay_s:
                 await asyncio.sleep(self.request_delay_s)
-            content_tracker = StreamTracker()
-            reasoning_tracker = StreamTracker()
+            trackers = _Trackers()
             try:
-                return await self._stream_once(
-                    payload, content_tracker, reasoning_tracker, use_stream_options
-                )
+                return await self._stream_once(payload, trackers, use_stream_options)
             except _BadRequest as e:
                 # Some servers reject stream_options; retry once without it.
                 if use_stream_options and "stream_options" in str(e.detail):
@@ -123,8 +143,7 @@ class OpenAICompatProvider(Provider):
     async def _stream_once(
         self,
         payload: dict[str, Any],
-        content_tracker: StreamTracker,
-        reasoning_tracker: StreamTracker,
+        trackers: _Trackers,
         use_stream_options: bool,
     ) -> ChatResponse:
         body = dict(payload)
@@ -171,11 +190,13 @@ class OpenAICompatProvider(Provider):
             content = delta.get("content")
             if content:
                 text_parts.append(content)
-                content_tracker.on_token()
+                trackers.content.on_token()
+                trackers.any.on_token()
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
                 reasoning_parts.append(reasoning)
-                reasoning_tracker.on_token()
+                trackers.reasoning.on_token()
+                trackers.any.on_token()
             for tc in delta.get("tool_calls") or []:
                 idx = tc.get("index", 0)
                 acc = tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
@@ -186,13 +207,9 @@ class OpenAICompatProvider(Provider):
                     acc["name"] += fn["name"]
                 if fn.get("arguments"):
                     acc["arguments"] += fn["arguments"]
-            if delta.get("tool_calls") and not text_parts:
-                content_tracker.on_token()
+                trackers.any.on_token()
 
-        # Prefer content timing; fall back to reasoning-only streams.
-        timing = content_tracker.snapshot()
-        if not timing.first_token and reasoning_tracker.chunk_times:
-            timing = reasoning_tracker.snapshot()
+        timing = trackers.snapshot()
         calls = [
             ToolCall(
                 id=acc.get("id") or f"call_{i}",
