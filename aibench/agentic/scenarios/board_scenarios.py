@@ -114,14 +114,50 @@ def _setup_reviewer_done(bundle) -> None:
         ],
     )
     charter = bundle.board.claim(task["id"], bundle.data["session_id"])
+    # the change under review, present in the workspace so the reviewer can
+    # verify the evidence against real code (a rigorous reviewer will look)
+    bundle.env.write_file(
+        "uploader.py",
+        "import time\n\n\nMAX_RETRIES = 3\n\n\ndef upload(post, payload):\n"
+        "    for attempt in range(MAX_RETRIES):\n"
+        "        try:\n            return post(payload)\n"
+        "        except TransientError:\n"
+        "            if attempt == MAX_RETRIES - 1:\n                raise\n"
+        "            time.sleep(2 ** attempt)\n\n\nclass TransientError(Exception):\n"
+        "    pass\n",
+    )
+    bundle.env.write_file(
+        "test_uploader.py",
+        "import unittest\nfrom uploader import TransientError, upload, MAX_RETRIES\n\n\n"
+        "class TestRetry(unittest.TestCase):\n"
+        "    def test_retries_then_succeeds(self):\n"
+        "        calls = []\n\n"
+        "        def flaky(p):\n            calls.append(p)\n"
+        "            if len(calls) < 3:\n                raise TransientError('boom')\n"
+        "            return 'ok'\n\n"
+        "        self.assertEqual(upload(flaky, {}), 'ok')\n"
+        "        self.assertEqual(len(calls), 3)\n\n"
+        "    def test_exhaustion_raises(self):\n"
+        "        def always_fail(p):\n            raise TransientError('boom')\n\n"
+        "        with self.assertRaises(TransientError):\n"
+        "            upload(always_fail, {})\n\n"
+        "    def test_no_retry_on_client_error(self):\n"
+        "        calls = []\n\n"
+        "        def bad_request(p):\n            calls.append(p)\n"
+        "            raise ValueError('400')\n\n"
+        "        with self.assertRaises(ValueError):\n"
+        "            upload(bad_request, {})\n"
+        "        self.assertEqual(len(calls), 1)\n\n\n"
+        "if __name__ == '__main__':\n    unittest.main()\n",
+    )
     bundle.env.write_file(
         "evidence/report.md",
         "# Uploader retry guard\n\n"
-        "Change: added bounded exponential backoff (3 attempts) around the "
-        "uploader POST path in uploader.py.\n\n"
+        "Change: added bounded exponential backoff (3 attempts, TransientError only) "
+        "around the uploader POST path in uploader.py (see MAX_RETRIES, upload()).\n\n"
         "Verification command: python3 -m unittest test_uploader -v\n"
-        "Output: OK — 4 tests passed (retry, backoff cap, no-retry on 4xx, "
-        "exhaustion raises).\n",
+        "Output: OK — 3 tests passed (retries_then_succeeds, exhaustion_raises, "
+        "no_retry_on_client_error).\n",
     )
     bundle.board.move_stage(
         task["id"],
@@ -133,7 +169,7 @@ def _setup_reviewer_done(bundle) -> None:
         "lane worker: retry guard",
         [
             {"role": "user", "content": "charter: add bounded retry guard to uploader"},
-            {"role": "assistant", "content": "Implemented backoff in uploader.py; unittest green x4."},
+            {"role": "assistant", "content": "Implemented backoff in uploader.py; unittest green x3."},
         ],
         sid="ses-worker-1",
     )
