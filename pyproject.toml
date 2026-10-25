@@ -1,0 +1,43 @@
+[project]
+name = "aibench"
+version = "0.1.0"
+description = "Benchmarking harness for LLM inference: throughput / prefill / prefix-cache performance plus agentic tool-loop scenarios (plain coding tools and a mocked llmsafespaces board/session/task platform)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "lenaxia" }]
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+tok = ["tiktoken>=0.7"]
+
+[project.scripts]
+aibench = "aibench.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aibench"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["SIM108", "B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

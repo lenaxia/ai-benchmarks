@@ -1,0 +1,47 @@
+# Local inference server example (vLLM / llama.cpp / LM Studio / TGI).
+run_name: local-qwen32b-vllm
+notes: "baseline before quantization experiments"
+
+provider:
+  type: openai
+  base_url: http://localhost:8000/v1
+  model: Qwen2.5-32B-Instruct
+  api_key: ${LOCAL_API_KEY}   # empty string if your server ignores auth
+  timeout_s: 600
+  max_retries: 2
+
+hardware:
+  capture: true               # GPU/CPU/RAM of THIS machine
+  # manual:                   # use when the endpoint runs elsewhere
+  #   gpus: [{vendor: nvidia, name: RTX 4090, vram_gb: 24}]
+  #   cpu: {model: Ryzen 9 7950X, physical_cores: 16, threads: 32}
+  #   ram_gb: 64
+  #   notes: remote box over tailscale
+
+perf:
+  enabled: true
+  repeats: 3
+  warmup: 1
+  concurrency: 1
+  temperature: 0.7
+  chars_per_token: 4.0
+  decode:
+    context_levels: [512, 2048, 8192, 32768, 131072]
+    output_tokens: 256
+  prefill:
+    prompt_levels: [1024, 8192, 32768, 131072]
+    max_tokens: 32
+  cache:
+    prefix_tokens: 4096
+    repeats: 5
+    warmup: 1
+
+agentic:
+  enabled: true
+  scenarios: [all]
+  repeats: 1
+  subtask:
+    max_depth: 1
+    max_turns: 12
+
+output_dir: results

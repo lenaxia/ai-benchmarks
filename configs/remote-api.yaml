@@ -1,0 +1,32 @@
+# Remote API example (anything OpenAI-compatible: OpenRouter, OpenAI, etc.)
+run_name: api-glm45-air
+notes: "reference model for agentic scenarios"
+
+provider:
+  type: openai
+  base_url: https://openrouter.ai/api/v1
+  model: z-ai/glm-4.5-air
+  api_key: ${OPENROUTER_API_KEY}
+  timeout_s: 300
+  request_delay_s: 0.5      # be polite to shared endpoints
+
+hardware:
+  capture: false            # client hardware is not the serving hardware
+  manual:
+    notes: hosted endpoint — provider-side hardware unknown
+
+perf:
+  enabled: false            # tokens/sec against a shared API is noise
+  # cache benchmarks against hosted APIs measure THEIR cache pricing
+  # behaviour; enable consciously:
+  # cache: {enabled: true, prefix_tokens: 4096, repeats: 5}
+
+agentic:
+  enabled: true
+  scenarios: [all]
+  repeats: 1
+  subtask:
+    max_depth: 1
+    max_turns: 12
+
+output_dir: results
