@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from aibench.bench.corpus import TokenEstimator
@@ -89,6 +90,23 @@ async def run_agentic_suite(
                 subagent_max_turns=cfg.agentic.subtask.max_turns,
                 max_depth=cfg.agentic.subtask.max_depth,
             )
+            retry = 0
+            while (
+                (result.error or result.stop_reason == "error")
+                and retry < cfg.agentic.retry_errors
+            ):
+                retry += 1
+                print(
+                    f"      [infra-error: {str(result.error or 'provider error')[:120]}] "
+                    f"retry {retry}/{cfg.agentic.retry_errors} in {cfg.agentic.retry_delay_s:.0f}s"
+                )
+                await asyncio.sleep(cfg.agentic.retry_delay_s)
+                result = await run_scenario(
+                    get_scenario(name),
+                    provider,
+                    subagent_max_turns=cfg.agentic.subtask.max_turns,
+                    max_depth=cfg.agentic.subtask.max_depth,
+                )
             writer.write_scenario(result, repeat + 1)
             results.append(result)
             status = "PASS" if result.passed else "FAIL"

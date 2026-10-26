@@ -30,6 +30,10 @@ class ProviderCfg(BaseModel):
     extra_headers: dict[str, str] = Field(default_factory=dict)
     stream_options: bool = True
     request_delay_s: float = 0.0
+    # merged verbatim into every request body — e.g.
+    #   extra_body: {chat_template_kwargs: {enable_thinking: true}}
+    # (works on vLLM natively and on litellm relays; verified wire-shape)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class HardwareCfg(BaseModel):
@@ -77,6 +81,10 @@ class AgenticCfg(BaseModel):
     enabled: bool = True
     scenarios: list[str] = Field(default_factory=lambda: ["all"])
     repeats: int = 1
+    # rerun attempts for scenarios killed by provider/infra errors
+    # (stop_reason == "error"); behavioral FAILs are never retried
+    retry_errors: int = 1
+    retry_delay_s: float = 60.0
     subtask: SubtaskCfg = Field(default_factory=SubtaskCfg)
 
 

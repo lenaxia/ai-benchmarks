@@ -126,6 +126,7 @@ async def _cmd_run(args) -> int:
         extra_headers=cfg.provider.extra_headers,
         stream_options=cfg.provider.stream_options,
         request_delay_s=cfg.provider.request_delay_s,
+        extra_body=cfg.provider.extra_body,
     )
     writer = ResultsWriter(cfg.output_dir, cfg.run_name)
     writer.write_run_meta(cfg.to_public_dict(), hardware.to_dict() if hardware else {})

@@ -49,6 +49,7 @@ def _record_turn(ctx: RunContext, resp: ChatResponse, tag: str, turn: int) -> No
         "prompt_tokens": usage.prompt_tokens if usage else None,
         "completion_tokens": usage.completion_tokens if usage else None,
         "cached_tokens": usage.cached_tokens if usage else None,
+        "reasoning_tokens": usage.reasoning_tokens if usage else None,
         "tool_calls": len(resp.tool_calls),
     }
     ctx.metrics.per_turn.append(row)
@@ -56,6 +57,7 @@ def _record_turn(ctx: RunContext, resp: ChatResponse, tag: str, turn: int) -> No
         ctx.metrics.prompt_tokens += usage.prompt_tokens or 0
         ctx.metrics.completion_tokens += usage.completion_tokens or 0
         ctx.metrics.cached_tokens += usage.cached_tokens or 0
+        ctx.metrics.reasoning_tokens += usage.reasoning_tokens or 0
 
 
 async def run_agent_loop(
@@ -94,6 +96,9 @@ async def run_agent_loop(
         resp = await provider.chat(messages=messages, tools=registry.schemas())
         _record_turn(ctx, resp, tag, turn)
 
+        if resp.retry_wait_s:
+            # infra waits must not consume the scenario's wall budget
+            ctx.deadline = (ctx.deadline or 0) + resp.retry_wait_s
         if not resp.ok:
             result.stop_reason = "error"
             messages.append(

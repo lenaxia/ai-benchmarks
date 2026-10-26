@@ -72,6 +72,7 @@ class RunMetrics:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    reasoning_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +86,7 @@ class RunMetrics:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
         }
 
 

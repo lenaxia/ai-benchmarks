@@ -33,6 +33,7 @@ class RequestRecord:
             "prompt_tokens": prompt_tok,
             "output_tokens": out_tok,
             "cached_tokens": r.usage.cached_tokens if r.usage else None,
+            "reasoning_tokens": r.usage.reasoning_tokens if r.usage else None,
             "timing": r.timing.to_dict(),
         }
         row.update(self.derived)

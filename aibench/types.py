@@ -108,6 +108,7 @@ class ChatResponse:
     usage: Usage | None = None
     timing: Timing = field(default_factory=Timing)
     error: str | None = None
+    retry_wait_s: float = 0.0  # infra backoff time, excluded from scenario budgets
     completion_tokens_observed: int = 0  # fallback count from stream chunks
     prompt_tokens_estimated: int | None = None
 

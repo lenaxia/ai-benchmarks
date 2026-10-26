@@ -46,6 +46,19 @@ class _Retryable(Exception):
     pass
 
 
+def _cooldown_hint(e: Exception) -> float | None:
+    import re
+
+    text = str(e)
+    m = re.search(r"[Tt]ry again in (\d+) seconds", text)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"Retry-After:\s*(\d+)", text, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return None
+
+
 class _Fatal(Exception):
     pass
 
@@ -71,7 +84,11 @@ class OpenAICompatProvider(Provider):
         extra_headers: dict[str, str] | None = None,
         stream_options: bool = True,
         request_delay_s: float = 0.0,
+        extra_body: dict[str, Any] | None = None,
+        max_cooldown_wait_s: float = 320.0,
     ) -> None:
+        self.extra_body = extra_body or {}
+        self.max_cooldown_wait_s = max_cooldown_wait_s
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
@@ -111,10 +128,13 @@ class OpenAICompatProvider(Provider):
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if self.extra_body:
+            payload.update(self.extra_body)
         if extra_body:
             payload.update(extra_body)
 
         attempt = 0
+        retry_wait = 0.0
         use_stream_options = self.stream_options
         last_err: Exception | None = None
         while attempt <= self.max_retries:
@@ -137,8 +157,18 @@ class OpenAICompatProvider(Provider):
                 if attempt > self.max_retries:
                     break
                 backoff = min(2.0**attempt, 30.0) + random.uniform(0, 0.5)
+                # honor server cooldown hints ("Try again in 300 seconds",
+                # Retry-After) so pool-wide 429s don't burn the retry budget
+                # against a wall
+                hint = _cooldown_hint(e)
+                if hint is not None:
+                    backoff = max(backoff, min(hint, self.max_cooldown_wait_s))
+                retry_wait += backoff
                 await asyncio.sleep(backoff)
-        return ChatResponse(error=f"request failed after {attempt + 1} attempts: {last_err!r}")
+        return ChatResponse(
+            error=f"request failed after {attempt + 1} attempts: {last_err!r}",
+            retry_wait_s=retry_wait,
+        )
 
     async def _stream_once(
         self,
